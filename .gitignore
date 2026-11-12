@@ -1,0 +1,20 @@
+# Large / machine-local (recreated by setup.sh or by running jobs)
+.venv/
+.cache/
+.home/
+third_party/
+checkpoints/
+/logs/
+__pycache__/
+*.pyc
+
+# Raw results (per-step logs, rollout videos; ~1 GB) stay on the cluster.
+# Only the summary and the small timing results are tracked.
+results/*
+!results/SUMMARY.md
+!results/latency/
+!results/profile/
+!results/ar_timing/
+results/latency/**/rollouts/
+results/latency/**/*.mp4
+results/**/*.mp4

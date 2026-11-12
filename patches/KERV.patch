@@ -1,0 +1,85 @@
+diff --git a/openvla/experiments/robot/libero/run_kerv_libero.py b/openvla/experiments/robot/libero/run_kerv_libero.py
+index 796a3e0..e9559b3 100755
+--- a/openvla/experiments/robot/libero/run_kerv_libero.py
++++ b/openvla/experiments/robot/libero/run_kerv_libero.py
+@@ -104,6 +104,7 @@ class GenerateConfig:
+     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
+     num_trials_per_task: int = 1                    # Number of rollouts per task
+     max_tasks: Optional[int] = None                  # Optional short-run cap for deployment smoke tests
++    task_id: int = -1                                # [gdl_proj] run only this task id (-1 = all tasks)
+     max_episode_steps: Optional[int] = None          # Optional policy-step cap for deployment smoke tests
+ 
+     #################################################################################################################
+@@ -718,7 +719,7 @@ def eval_libero(cfg: GenerateConfig) -> None:
+         processor._flagos_prompt_cache_model = str(cfg.pretrained_checkpoint)
+ 
+     # Initialize local logging
+-    target_dir = os.path.join(cfg.local_log_dir, "libero_goal_spec_relaxed")
++    target_dir = os.path.join(cfg.local_log_dir, f"{cfg.task_suite_name}_task{cfg.task_id}")  # [gdl_proj] was hard-coded libero_goal_spec_relaxed
+     os.makedirs(target_dir,exist_ok=True)
+     run_id = f"EVAL-{cfg.task_suite_name}-{cfg.model_family}-{DATE_TIME}"
+     if cfg.run_id_note is not None:
+@@ -773,6 +774,8 @@ def eval_libero(cfg: GenerateConfig) -> None:
+     total_episodes, total_successes = 0, 0
+     all_task_times: Dict[str, Dict[str, List[List[float]]]] = {}
+     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
++        if cfg.task_id >= 0 and task_id != cfg.task_id:  # [gdl_proj] split suite across array jobs
++            continue
+         # Get task
+         task = task_suite.get_task(task_id)
+ 
+@@ -824,13 +827,13 @@ def eval_libero(cfg: GenerateConfig) -> None:
+             replay_images = []
+             episode_action_history: List[np.ndarray] = [] if cfg.store_action_history else None
+             if cfg.task_suite_name == "libero_spatial":
+-                max_steps = 170  # longest training demo has 193 steps
++                max_steps = 220  # [gdl_proj] KERV release used 170; longest training demo has 193 steps
+             elif cfg.task_suite_name == "libero_object":
+-                max_steps = 240  # longest training demo has 254 steps
++                max_steps = 280  # [gdl_proj] KERV release used 240; longest training demo has 254 steps
+             elif cfg.task_suite_name == "libero_goal":
+-                max_steps = 220  # longest training demo has 270 steps
++                max_steps = 300  # [gdl_proj] KERV release used 220; longest training demo has 270 steps
+             elif cfg.task_suite_name == "libero_10":
+-                max_steps = 470  # longest training demo has 505 steps
++                max_steps = 520  # [gdl_proj] KERV release used 470; longest training demo has 505 steps
+             elif cfg.task_suite_name == "libero_90":
+                 max_steps = 400  # longest training demo has 373 steps
+             if cfg.max_episode_steps is not None:
+diff --git a/openvla/prismatic/extern/hf/modeling_speculation.py b/openvla/prismatic/extern/hf/modeling_speculation.py
+index 5c2e048..356439d 100755
+--- a/openvla/prismatic/extern/hf/modeling_speculation.py
++++ b/openvla/prismatic/extern/hf/modeling_speculation.py
+@@ -1,4 +1,5 @@
+ import copy
++import os  # [gdl_proj]
+ import json
+ import time
+ 
+@@ -2034,7 +2035,9 @@ class SpecVLAforActionPrediction(nn.Module):
+         new_token = 0
+             # 每4次使用 Speculative (SD) 后，进行1次 Kalman Fallback (KF)
+             # 也就是说当 (step_idx+1) 对 5 取模为 0 时触发 KF：SD,SD,SD,SD, KF, ...
+-        force_direct_completion = self._step_idx >= 0 and ((self._step_idx + 1) % 4 == 0)
++        # [gdl_proj] KERV_FORCE_KF_EVERY env var (default 4 = release behavior; 0 = never force Kalman completion)
++        _kf_every = int(os.environ.get("KERV_FORCE_KF_EVERY", "4"))
++        force_direct_completion = _kf_every > 0 and self._step_idx >= 0 and ((self._step_idx + 1) % _kf_every == 0)
+         # force_direct_completion = False #暂时关闭kf
+         for idx in range(max_length):
+             # with Timer("all"):
+diff --git a/openvla/specdecoding/model/cnets.py b/openvla/specdecoding/model/cnets.py
+index b28df99..d2877ca 100755
+--- a/openvla/specdecoding/model/cnets.py
++++ b/openvla/specdecoding/model/cnets.py
+@@ -623,6 +623,11 @@ class LlamaRMSNorm(nn.Module):
+         self.variance_epsilon = eps
+ 
+     def forward(self, hidden_states):
++        if not hasattr(F, "rms_norm"):  # [gdl_proj] torch<2.4 fallback = standard LLaMA RMSNorm (as in SpecVLA)
++            input_dtype = hidden_states.dtype
++            h = hidden_states.to(torch.float32)
++            h = h * torch.rsqrt(h.pow(2).mean(-1, keepdim=True) + self.variance_epsilon)
++            return self.weight * h.to(input_dtype)
+         return F.rms_norm(
+             hidden_states,
+             (hidden_states.shape[-1],),
