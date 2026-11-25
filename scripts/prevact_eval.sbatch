@@ -1,7 +1,7 @@
 #!/bin/bash
 # Full success run of the previous-action draft (scripts/prevact_eval.py, MODE=prev by default) on all 40 LIBERO tasks.
 # Array index = suite*10 + task; 50 trials each. Output: results/prevact_full/<mode>/<suite>_t<task>.json.
-# Submit from project root:  sbatch --array=0-39%4 scripts/prevact_eval.sbatch
+# Submit from project root:  sbatch --array=0-39%4 scripts/prevact_eval.sbatch   (relaxed: TAG=_r3t01 EXTRA_ARGS="--relax_r 3 --relax_tau 0.1")
 #SBATCH --job-name=prevfull
 #SBATCH --partition=kira-lab
 #SBATCH --account=kira-lab
@@ -21,7 +21,7 @@ python -c "import torch; torch.zeros(8, device='cuda:0'); f=torch.cuda.mem_get_i
 SUITES=(libero_spatial libero_object libero_goal libero_10); CK=(spatial object goal 10)
 S=$((SLURM_ARRAY_TASK_ID / 10)); T=$((SLURM_ARRAY_TASK_ID % 10)); MODE=${MODE:-prev}
 BASE=$(python -c "from huggingface_hub import snapshot_download as s; print(s('openvla/openvla-7b-finetuned-libero-${CK[$S]}', local_files_only=True))")
-R=$PROJ/results/prevact_full/$MODE; mkdir -p $R; cd $R
+R=$PROJ/results/prevact_full/$MODE${TAG}; mkdir -p $R; cd $R
 PYTHONPATH=$PROJ/third_party/openvla python $PROJ/scripts/prevact_eval.py --pretrained_checkpoint $BASE \
-  --task_suite_name ${SUITES[$S]} --task_id $T --mode $MODE --num_trials_per_task 50 --out $R/${SUITES[$S]}_t$T.json
+  --task_suite_name ${SUITES[$S]} --task_id $T --mode $MODE ${EXTRA_ARGS} --num_trials_per_task 50 --out $R/${SUITES[$S]}_t$T.json
 echo "DONE $(date)"

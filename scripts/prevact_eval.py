@@ -35,6 +35,8 @@ class Cfg:
     num_trials_per_task: int = 3
     mode: str = "prev"
     check: bool = False
+    relax_r: int = 0          # >0: also accept a draft token within relax_r bins of the verifier's choice ...
+    relax_tau: float = 0.0    # ... if p(draft) >= relax_tau * p(verifier's choice). r=0 -> exact.
     out: str = "results/prevact/out.json"
     seed: int = 7
 
@@ -49,7 +51,7 @@ def crop(pkv, n):
     return pkv
 
 
-def make_generate(model, state, calls):
+def make_generate(model, state, calls, r=0, tau=0.0):
     """Replacement for model.generate used by predict_action (greedy, batch 1)."""
     stock = model.generate
 
@@ -67,9 +69,18 @@ def make_generate(model, state, calls):
             x = torch.tensor([[g[-1]] + list(d)], device=input_ids.device)
             o = model.language_model(input_ids=x, past_key_values=pkv, use_cache=True)
             calls["n"] += 1
-            am = o.logits[0].argmax(-1).tolist()
+            lg = o.logits[0]
+            am = lg.argmax(-1).tolist()
+            if r > 0 and len(d):
+                pr = lg[:len(d)].float().softmax(-1)
+                dt = torch.tensor(list(d), device=lg.device)
+                ar = torch.arange(len(d), device=lg.device)
+                ok = ((dt - pr.argmax(-1)).abs() <= r) & (pr[ar, dt] >= tau * pr.max(-1).values)
+                ok = ok.tolist()
+            else:
+                ok = [False] * len(d)
             L = 0
-            while L < len(d) and am[L] == d[L]:
+            while L < len(d) and (am[L] == d[L] or ok[L]):
                 L += 1
             g += list(d[:L])
             if len(g) < max_new_tokens:
@@ -80,12 +91,12 @@ def make_generate(model, state, calls):
         g = g[:max_new_tokens]
         state["prev"] = g if state.get("use_draft", True) else None
         if state.get("check"):
-            r = stock(input_ids, max_new_tokens=max_new_tokens, pixel_values=pixel_values, attention_mask=attention_mask,
+            res = stock(input_ids, max_new_tokens=max_new_tokens, pixel_values=pixel_values, attention_mask=attention_mask,
                       do_sample=False, output_scores=True, return_dict_in_generate=True)
-            ref = r.sequences[0, -max_new_tokens:].tolist()
+            ref = res.sequences[0, -max_new_tokens:].tolist()
             if ref != g:  # stock top-1 minus top-2 logit gap and stock prob at the first differing position
                 j = next(i for i in range(max_new_tokens) if ref[i] != g[i])
-                sc = r.scores[j][0].float()
+                sc = res.scores[j][0].float()
                 top2 = sc.topk(2).values
                 state.setdefault("gaps", []).append([j, float(top2[0] - top2[1]), float(sc.softmax(-1).max()),
                                                      float(sc[ref[j]] - sc[g[j]])])
@@ -109,7 +120,7 @@ def main(cfg: Cfg):
     state = {"check": cfg.check, "mism": 0, "n": 0}
     state["use_draft"] = cfg.mode == "prev"
     if cfg.mode in ("prev", "mine"):  # mine = our decode loop with no draft (plain AR), to separate numerics from drafting
-        model.generate = make_generate(model, state, calls)
+        model.generate = make_generate(model, state, calls, cfg.relax_r, cfg.relax_tau)
     else:
         model.language_model.register_forward_hook(lambda *_: calls.__setitem__("n", calls["n"] + 1))
     suite = benchmark.get_benchmark_dict()[cfg.task_suite_name]()
